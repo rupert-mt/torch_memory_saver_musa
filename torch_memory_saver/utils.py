@@ -19,6 +19,15 @@ def _is_rocm_torch() -> bool:
     return bool(getattr(torch.version, "hip", None))
 
 
+def _is_musa_torch() -> bool:
+    try:
+        import torch
+    except ImportError:
+        return False
+
+    return hasattr(torch, "musa")
+
+
 @lru_cache(maxsize=1)
 def is_xpu() -> bool:
     try:
@@ -83,6 +92,9 @@ def get_binary_path_from_package(stem: str):
     if _is_rocm_torch():
         pattern = f"{stem}.*.so"
         runtime_desc = "ROCm/HIP torch"
+    elif _is_musa_torch():
+        pattern = f"{stem}.*.so"
+        runtime_desc = "MUSA torch"
     elif is_xpu():
         pattern = f"{stem}.*.so"
         runtime_desc = "Intel XPU torch"

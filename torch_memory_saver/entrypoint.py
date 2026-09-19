@@ -15,6 +15,19 @@ from .utils import is_xpu
 
 logger = logging.getLogger(__name__)
 
+
+def _patch_torch_cuda_for_musa():
+    """torch_musa exposes MUSA APIs under torch.musa; alias the torch.cuda entry
+    points used below so the CUDA-shaped code paths work on MUSA builds."""
+    if not hasattr(torch, "musa"):
+        return
+    for name in ("MemPool", "use_mem_pool", "graph", "empty_cache"):
+        if hasattr(torch.musa, name):
+            setattr(torch.cuda, name, getattr(torch.musa, name))
+
+
+_patch_torch_cuda_for_musa()
+
 _TAG_DEFAULT = "default"
 CpuBackupBackend = Literal["mmap", "pinned"]
 
@@ -317,8 +330,24 @@ class _TorchMemorySaverImpl:
             # We can either reuse the pool or delete it immediately, and we implement the latter currently since Slime uses it.
             # About why we need a pool: https://github.com/fzyzcjy/torch_memory_saver/pull/20#issuecomment-3047099047
             pool = torch.cuda.MemPool()
-            with torch.cuda.use_mem_pool(pool):
-                yield
+            # On MUSA, torch_musa aborts in _musa_emptyCache with
+            # "captures_underway.empty() INTERNAL ASSERT FAILED" while a mempool
+            # is active, and callers such as slime call empty_cache() inside this
+            # region. Pool blocks are released by `del pool`, so replace
+            # empty_cache with a no-op for the duration of the region.
+            saved = []
+            if hasattr(torch, "musa"):
+                for module_name in ("musa", "cuda"):
+                    module = getattr(torch, module_name, None)
+                    if module is not None and hasattr(module, "empty_cache"):
+                        saved.append((module, module.empty_cache))
+                        module.empty_cache = lambda *a, **k: None
+            try:
+                with torch.cuda.use_mem_pool(pool):
+                    yield
+            finally:
+                for module, fn in saved:
+                    module.empty_cache = fn
             del pool
         finally:
             self._binary_wrapper.cdll.tms_set_interesting_region(True)
