@@ -22,6 +22,14 @@ def _find_platform_home(platform):
                 home = os.path.dirname(os.path.dirname(compiler_path))
             else:
                 home = '/usr/local/cuda'
+    elif platform == "musa":
+        home = os.environ.get('MUSA_HOME')
+        if home is None:
+            mcc = shutil.which("mcc")
+            if mcc is not None:
+                home = os.path.dirname(os.path.dirname(mcc))
+            else:
+                home = '/usr/local/musa'
     elif platform == "xpu":
         home = os.environ.get('ONEAPI_ROOT')
         if home is None:
@@ -53,11 +61,21 @@ def _detect_platform():
         return "hip"
     elif shutil.which("nvcc") is not None:
         return "cuda"
+    elif _has_musa():
+        return "musa"
     elif _find_icpx() is not None:
         return "xpu"
     else:
         # Default to CUDA if neither is found
         return "cuda"
+
+
+def _has_musa():
+    """True when a MUSA toolchain is available (MUSA_HOME or 'mcc' on PATH)."""
+    if shutil.which("mcc") is not None:
+        return True
+    home = os.environ.get("MUSA_HOME")
+    return bool(home) and os.path.isfile(os.path.join(home, "bin", "mcc"))
 
 
 class PlatformExtension(setuptools.Extension):
@@ -110,7 +128,9 @@ class build_platform_ext(build_ext):
 
 def _create_ext_modules(platform):
     """Create extension modules based on the specified platform."""
-    
+    if platform == "musa":
+        return _create_ext_modules_musa()
+
     # Common sources for all extensions
     sources = [
         'csrc/api_forwarder.cpp',
@@ -204,6 +224,63 @@ def _create_ext_modules(platform):
     ]
 
     return ext_modules
+
+
+# ============================== For MUSA ==============================
+def _create_ext_modules_musa():
+    """MUSA build: driver/runtime API mapping lives in csrc/macro.h (USE_MUSA)."""
+    sources = [
+        'csrc/api_forwarder.cpp',
+        'csrc/core.cpp',
+        'csrc/disk_backend.cpp',
+        'csrc/entrypoint.cpp',
+        'csrc/hardware_musa_support.cpp',
+    ]
+
+    import torch, torch_musa
+
+    torch_musa_dir = Path(torch_musa.__file__).parent
+    platform_home = Path(_find_platform_home("musa"))
+
+    include_dirs = [
+        str((platform_home / 'include').resolve()),
+        str(torch_musa_dir / 'share' / 'torch_musa_codegen'),
+        '/home/torch_musa',
+    ]
+    library_dirs = [
+        str((platform_home / 'lib').resolve()),
+        str((platform_home / 'lib64').resolve()),
+    ]
+    libraries = ['musa', 'musart']
+    common_macros = [('Py_LIMITED_API', '0x03090000')]
+    platform_macros = [('USE_MUSA', '1')]
+
+    # Keep default symbol visibility: musaMalloc/musaFree must stay exported for
+    # LD_PRELOAD interception and tms_* for the ctypes API.
+    cxx_flags = ["-O3", "-std=c++17", "-Wno-reorder", "-march=native"]
+    mcc_flags = ["-O3", "-march=native"]
+
+    from torch_musa.utils.musa_extension import MUSAExtension
+
+    return [
+        MUSAExtension(
+            name,
+            sources,
+            include_dirs=include_dirs,
+            library_dirs=library_dirs,
+            libraries=libraries,
+            define_macros=[*common_macros, *platform_macros, *extra_macros],
+            py_limited_api=True,
+            extra_compile_args={
+                "cxx": cxx_flags,
+                "mcc": mcc_flags,
+            },
+        )
+        for name, extra_macros in [
+            ('torch_memory_saver_hook_mode_preload', [('TMS_HOOK_MODE_PRELOAD', '1')]),
+            ('torch_memory_saver_hook_mode_torch', [('TMS_HOOK_MODE_TORCH', '1')]),
+        ]
+    ]
 
 
 # ============================== For Intel XPU ==============================
@@ -320,15 +397,24 @@ print(f"Detected platform: {platform}")
 ext_modules = _create_ext_modules(platform)
 
 # Create unified build command class instance
-class build_ext_for_platform(build_platform_ext):
-    def __init__(self, dist):
-        super().__init__(dist, platform=platform)
+if platform == "musa":
+    # torch's BuildExtension understands the per-language extra_compile_args
+    # dict ({"cxx": ..., "mcc": ...}) and drives mcc for MUSA sources.
+    from torch_musa.utils.musa_extension import BuildExtension as MusaBuildExtension
+
+    cmdclass = {'build_ext': MusaBuildExtension}
+else:
+    class build_ext_for_platform(build_platform_ext):
+        def __init__(self, dist):
+            super().__init__(dist, platform=platform)
+
+    cmdclass = {'build_ext': build_ext_for_platform}
 
 setup(
     name='torch_memory_saver',
     version='0.0.10',
     ext_modules=ext_modules,
-    cmdclass={'build_ext': build_ext_for_platform},
+    cmdclass=cmdclass,
     python_requires=">=3.9",
     packages=setuptools.find_packages(include=["torch_memory_saver", "torch_memory_saver.*"]),
 )

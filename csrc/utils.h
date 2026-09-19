@@ -196,6 +196,68 @@ namespace CUDAUtils {
         return ans;
     }
 
+#elif defined(USE_MUSA)
+    static MUmemAllocationProp cu_mem_get_allocation_prop(MUdevice device) {
+        MUmemAllocationProp prop = {};
+        prop.type = MU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location.type = MU_MEM_LOCATION_TYPE_DEVICE;
+        prop.location.id = device;
+
+        int flag = 0;
+        CURESULT_CHECK(muDeviceGetAttribute(
+            &flag, MU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_MUSA_VMM_SUPPORTED, device));
+        if (flag) {  // support GPUDirect RDMA if possible
+            prop.allocFlags.gpuDirectRDMACapable = 1;
+        }
+
+        return prop;
+    }
+
+    static size_t cu_mem_get_allocation_size(size_t raw_size, MUdevice device) {
+        const MUmemAllocationProp prop = cu_mem_get_allocation_prop(device);
+        size_t granularity = 0;
+        CURESULT_CHECK(muMemGetAllocationGranularity(
+            &granularity, &prop, MU_MEM_ALLOC_GRANULARITY_MINIMUM));
+        SIMPLE_CHECK(granularity > 0, "muMemGetAllocationGranularity returned zero");
+        SIMPLE_CHECK(
+            raw_size <= std::numeric_limits<size_t>::max() - (granularity - 1),
+            "allocation size overflow while applying MUSA VMM granularity");
+        return ((raw_size + granularity - 1) / granularity) * granularity;
+    }
+
+    static musaError_t cu_mem_create(MUmemGenericAllocationHandle *alloc_handle, size_t allocation_size, MUdevice device) {
+        const MUmemAllocationProp prop = cu_mem_get_allocation_prop(device);
+
+        MUresult ret = muMemCreate(alloc_handle, allocation_size, &prop, 0);
+        if (ret == MUSA_ERROR_OUT_OF_MEMORY) {
+            std::cerr << "[torch_memory_saver.cpp] muMemCreate MUSA_ERROR_OUT_OF_MEMORY (may not be an issue e.g. torch allocator will free cache and retry)" << std::endl;
+            return musaErrorMemoryAllocation;
+        }
+        CURESULT_CHECK(ret);
+
+        return musaSuccess;
+    }
+
+    static void cu_mem_set_access(void *ptr, size_t allocation_size, MUdevice device) {
+        MUmemAccessDesc access_desc = {};
+        access_desc.location.type = MU_MEM_LOCATION_TYPE_DEVICE;
+        access_desc.location.id = device;
+        access_desc.flags = MU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        CURESULT_CHECK(muMemSetAccess((MUdeviceptr) ptr, allocation_size, &access_desc, 1));
+    }
+
+    static MUdevice cu_ctx_get_device() {
+        MUdevice ans;
+        CURESULT_CHECK(muCtxGetDevice(&ans));
+        return ans;
+    }
+
+    static MUdevice cu_device_get(int device_ordinal) {
+        MUdevice ans;
+        CURESULT_CHECK(muDeviceGet(&ans, device_ordinal));
+        return ans;
+    }
+
 #elif defined(USE_XPU)
     [[maybe_unused]] static CUdevice cu_device_get(int device_ordinal) {
         return static_cast<CUdevice>(device_ordinal);
