@@ -23,7 +23,18 @@ uv run --no-project --with pytest --with packaging --with typer --with setuptool
   .claude/skills/tms-publish-release/scripts/test_*.py -vv -ra
 ```
 
-# 2 Full matrix tests
+# 2 MUSA tests
+
+- Use a MUSA host/container with `pytorch_musa` and a MUSA toolkit (`mcc` on `PATH` or `MUSA_HOME`), then build in place and run the same suite against a visible device:
+
+```bash
+python setup.py build_ext --inplace
+MUSA_VISIBLE_DEVICES=0 python -m pytest test -vv -ra
+```
+
+- Both hook modes are exercised. `test/test_musa_backend.py` and the `test_musa_*` cases cover MUSA-only behavior (resume zeroing, per-device disable pools, `torch.cuda` aliasing); the CUDA loader/RPATH tests skip because MUSA binaries are unsuffixed. `sum()` on `uint8` tensors fails in muDNN, so examples assert with float tensors or `.tolist()`.
+
+# 3 Full matrix tests
 
 - Run the ordinary and tooling tests above, then use [tms-publish-release](../tms-publish-release/SKILL.md) Sections 2–5 for isolated paths, Docker/ARM64 binfmt setup, both wheel builds, and fresh GPU containers on `tom-workstation`.
 - For development testing, use the target commit and its `setup.py` version; release-only requirements to use merged `origin/master`, check PyPI, or publish do not apply.

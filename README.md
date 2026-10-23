@@ -134,6 +134,25 @@ Please refer to `rl_example.py` for details.
 | NVIDIA (CUDA) | CUDA VMM (`cuMemMap`/`cuMemCreate`) | preload, torch | `pip install torch_memory_saver` (prebuilt wheel) |
 | AMD (ROCm) | HIP VMM (`hipMemMap`/`hipMemCreate`) | preload, torch | `pip install torch_memory_saver` (prebuilt wheel) |
 | Intel (XPU) | Level Zero VMM (`zeVirtualMemMap`/`zePhysicalMemCreate`) | torch only | `pip install` from source (builds against local oneAPI) |
+| Moore Threads (MUSA) | MUSA VMM (`muMemCreate`/`muMemMap`) | preload, torch | `pip install` from source (builds against local MUSA toolkit) |
+
+### Moore Threads (MUSA)
+
+Same pause/resume behavior on MUSA GPUs via MUSA VMM, through
+`torch.musa.memory.MUSAPluggableAllocator` + `torch.musa.MemPool` in torch mode
+and the `musaMalloc`/`musaFree` preload hook. `pytorch_musa` must be importable
+and `mcc` on `PATH` (or `MUSA_HOME` set):
+
+```bash
+pip install --no-build-isolation .
+```
+
+MUSA differs from CUDA in three observable ways: `resume()` zeroes a region
+without CPU backup instead of leaving it undefined, `disable()` reuses one
+`MemPool` per device because a dropped MUSA pool keeps its cached blocks, and
+`empty_cache()` is a no-op inside `disable()` because `torch_musa` aborts while a
+pool is active. Allocations made by MCCL and muDNN themselves bypass the preload
+hook, since those libraries cannot operate on VMM-backed buffers.
 
 ### Intel XPU
 
