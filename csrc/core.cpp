@@ -1,10 +1,57 @@
 #include "core.h"
+#include <cstdint>
+#include <cstdio>
+#include <ctime>
+#include <unistd.h>
 #include "utils.h"
 #include "macro.h"
 #include "api_forwarder.h"
 
 #include <algorithm>
 #include <set>
+
+namespace {
+bool tms_trace_regions_enabled() {
+    static const bool enabled = get_bool_env_var("TMS_TRACE_REGIONS");
+    return enabled;
+}
+
+void tms_trace_region(
+    const char* op,
+    const void* ptr,
+    const std::string& tag,
+    size_t allocation_size,
+    bool enable_cpu_backup) {
+    if (!tms_trace_regions_enabled()) {
+        return;
+    }
+    struct timespec now {};
+    struct tm local {};
+    clock_gettime(CLOCK_REALTIME, &now);
+    localtime_r(&now.tv_sec, &local);
+    const auto begin = reinterpret_cast<uintptr_t>(ptr);
+    char buf[320];
+    const int n = std::snprintf(
+        buf, sizeof(buf),
+        "[TMS-REGION] %04d-%02d-%02d %02d:%02d:%02d.%06ld %s tag=%s"
+        " ptr=0x%llx end=0x%llx size=%zu backup=%d\n",
+        local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+        local.tm_hour, local.tm_min, local.tm_sec,
+        static_cast<long>(now.tv_nsec / 1000),
+        op, tag.c_str(),
+        static_cast<unsigned long long>(begin),
+        static_cast<unsigned long long>(begin + allocation_size),
+        allocation_size,
+        enable_cpu_backup ? 1 : 0);
+    if (n > 0) {
+        const size_t len = static_cast<size_t>(n) < sizeof(buf)
+            ? static_cast<size_t>(n)
+            : sizeof(buf) - 1;
+        const ssize_t written = ::write(STDOUT_FILENO, buf, len);
+        (void)written;
+    }
+}
+}  // namespace
 
 TorchMemorySaver::TorchMemorySaver()
     : disk_backend_(compute_disk_backup_dir_from_env(), compute_disk_chunk_bytes_from_env()) {
@@ -83,6 +130,8 @@ cudaError_t TorchMemorySaver::malloc(
                 enable_disk_backup, DiskBackupSlot{}, allocation_size, allocHandle}
         );
     }
+
+    tms_trace_region("alloc", *ptr, tag, allocation_size, enable_cpu_backup);
 
 #ifdef TMS_DEBUG_LOG
     std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.malloc "
@@ -202,6 +251,7 @@ cudaError_t TorchMemorySaver::pause(const std::string& tag) {
             exit(1);
         }
 
+        tms_trace_region("pause", ptr, metadata.tag, metadata.allocation_size, metadata.enable_cpu_backup);
         if (metadata.enable_cpu_backup) {
             cpu_backuper::offload(ptr, metadata.raw_size, metadata.cpu_backup);
         } else if (metadata.enable_disk_backup) {
@@ -272,6 +322,8 @@ cudaError_t TorchMemorySaver::resume(const std::string& tag) {
         } else if (metadata.enable_disk_backup) {
             disk_backend_.onload(ptr, metadata.raw_size, metadata.disk);
         }
+
+        tms_trace_region("resume", ptr, metadata.tag, metadata.allocation_size, metadata.enable_cpu_backup);
 
 #ifdef TMS_DEBUG_LOG
         std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.resume"
