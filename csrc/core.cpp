@@ -314,8 +314,14 @@ cudaError_t TorchMemorySaver::resume(const std::string& tag) {
         CUDAUtils::cu_mem_set_access(ptr, metadata.allocation_size, metadata.device);
 
 #if defined(USE_MUSA)
+        // The resume loop is not bound to the allocation's device: memset and the
+        // synchronize that publishes the zeroed pages must run on that device.
+        int original_device = -1;
+        CUDA_ERROR_CHECK(cudaGetDevice(&original_device));
+        CUDA_ERROR_CHECK(cudaSetDevice(static_cast<int>(metadata.device)));
         CUDA_ERROR_CHECK(CUDAUtils::memset(ptr, 0, metadata.allocation_size));
         CUDA_ERROR_CHECK(cudaDeviceSynchronize());
+        CUDA_ERROR_CHECK(cudaSetDevice(original_device));
 #endif
 
         if (metadata.enable_cpu_backup) {
