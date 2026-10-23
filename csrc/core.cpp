@@ -313,6 +313,11 @@ cudaError_t TorchMemorySaver::resume(const std::string& tag) {
 
         CUDAUtils::cu_mem_set_access(ptr, metadata.allocation_size, metadata.device);
 
+#if defined(USE_MUSA)
+        CUDA_ERROR_CHECK(CUDAUtils::memset(ptr, 0, metadata.allocation_size));
+        CUDA_ERROR_CHECK(cudaDeviceSynchronize());
+#endif
+
         if (metadata.enable_cpu_backup) {
             cpu_backuper::onload(
                 ptr, metadata.raw_size, metadata.device, metadata.cpu_backup);

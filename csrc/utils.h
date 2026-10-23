@@ -246,6 +246,10 @@ namespace CUDAUtils {
         CURESULT_CHECK(muMemSetAccess((MUdeviceptr) ptr, allocation_size, &access_desc, 1));
     }
 
+    static musaError_t memset(void *ptr, int value, size_t size) {
+        return musaMemset(ptr, value, size);
+    }
+
     static MUdevice cu_ctx_get_device() {
         MUdevice ans;
         CURESULT_CHECK(muCtxGetDevice(&ans));
