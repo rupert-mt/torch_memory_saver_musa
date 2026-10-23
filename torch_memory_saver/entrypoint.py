@@ -96,6 +96,9 @@ class TorchMemorySaver:
     def pause(self, tag: Optional[str] = None):
         """Pause memory for specific tag or all memory if tag is None"""
         self._ensure_initialized()
+        # MUSA only: drain already-enqueued work before the region is unmapped.
+        if hasattr(torch, "musa") and os.environ.get("TMS_PAUSE_SYNC", "1") == "1":
+            torch.get_device_module().synchronize()
         self._impl.pause(tag=tag)
 
     def resume(self, tag: Optional[str] = None):
@@ -201,12 +204,21 @@ class _TorchMemorySaverImpl:
         self._mem_pools = defaultdict(
             lambda: self._device_module.MemPool(allocator=self._hook_util.get_allocator())
         )
+        # MUSA only: a deleted MemPool does not return cached blocks to the
+        # device, so keep one pool per device for the disable() path.
+        self._disable_mem_pools = (
+            defaultdict(lambda: self._device_module.MemPool())
+            if hasattr(torch, "musa")
+            else None
+        )
 
         _sanity_checks()
         if torch.version.hip or self._is_xpu:
             # HIP/SYCL runtime static dtors may run before MemPool's at exit
             # (destruction-order fiasco); free pools via atexit while runtime alive.
             atexit.register(self._mem_pools.clear)
+            if self._disable_mem_pools is not None:
+                atexit.register(self._disable_mem_pools.clear)
 
     @contextmanager
     def region(
@@ -315,40 +327,50 @@ class _TorchMemorySaverImpl:
             )
 
     @contextmanager
-    def disable(self, dispose_mem_pool_after_use: bool = True):
+    def disable(self, dispose_mem_pool_after_use: Optional[bool] = None):
         if self._is_xpu:
             raise NotImplementedError(
                 "TorchMemorySaver.disable() is not supported on Intel XPU. "
                 "Allocate outside a region() instead of using disable()."
             )
 
-        assert dispose_mem_pool_after_use, "Only dispose_mem_pool_after_use=true is supported now"
+        is_musa = hasattr(torch, "musa")
+        if dispose_mem_pool_after_use is None:
+            if is_musa:
+                dispose_mem_pool_after_use = os.environ.get("TMS_DISABLE_POOL_DISPOSE") == "1"
+            else:
+                dispose_mem_pool_after_use = True
+        if not is_musa:
+            assert dispose_mem_pool_after_use, "Only dispose_mem_pool_after_use=true is supported now"
         assert self._binary_wrapper.cdll.tms_get_interesting_region(), "disable() should be called only when tms is active"
 
         self._binary_wrapper.cdll.tms_set_interesting_region(False)
         try:
-            # We can either reuse the pool or delete it immediately, and we implement the latter currently since Slime uses it.
             # About why we need a pool: https://github.com/fzyzcjy/torch_memory_saver/pull/20#issuecomment-3047099047
-            pool = torch.cuda.MemPool()
+            pool = (
+                self._device_module.MemPool()
+                if dispose_mem_pool_after_use
+                else self._disable_mem_pools[self._current_device()]
+            )
             # On MUSA, torch_musa aborts in _musa_emptyCache with
             # "captures_underway.empty() INTERNAL ASSERT FAILED" while a mempool
             # is active, and callers such as slime call empty_cache() inside this
-            # region. Pool blocks are released by `del pool`, so replace
-            # empty_cache with a no-op for the duration of the region.
+            # region, so replace empty_cache with a no-op for the duration of the region.
             saved = []
-            if hasattr(torch, "musa"):
+            if is_musa:
                 for module_name in ("musa", "cuda"):
                     module = getattr(torch, module_name, None)
                     if module is not None and hasattr(module, "empty_cache"):
                         saved.append((module, module.empty_cache))
                         module.empty_cache = lambda *a, **k: None
             try:
-                with torch.cuda.use_mem_pool(pool):
+                with self._device_module.use_mem_pool(pool):
                     yield
             finally:
                 for module, fn in saved:
                     module.empty_cache = fn
-            del pool
+            if dispose_mem_pool_after_use:
+                del pool
         finally:
             self._binary_wrapper.cdll.tms_set_interesting_region(True)
 
