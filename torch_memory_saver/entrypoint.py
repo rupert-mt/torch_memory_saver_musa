@@ -11,7 +11,7 @@ import torch
 
 from .binary_wrapper import BinaryWrapper
 from .hooks.base import HookUtilBase, HookMode
-from .utils import is_xpu
+from .utils import is_musa, is_xpu
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def _patch_torch_cuda_for_musa():
     """torch_musa exposes MUSA APIs under torch.musa; alias the torch.cuda entry
     points used below so the CUDA-shaped code paths work on MUSA builds."""
-    if not hasattr(torch, "musa"):
+    if not is_musa():
         return
     for name in ("MemPool", "use_mem_pool", "graph", "empty_cache"):
         if hasattr(torch.musa, name):
@@ -96,9 +96,6 @@ class TorchMemorySaver:
     def pause(self, tag: Optional[str] = None):
         """Pause memory for specific tag or all memory if tag is None"""
         self._ensure_initialized()
-        # MUSA only: drain already-enqueued work before the region is unmapped.
-        if hasattr(torch, "musa") and os.environ.get("TMS_PAUSE_SYNC", "1") == "1":
-            torch.get_device_module().synchronize()
         self._impl.pause(tag=tag)
 
     def resume(self, tag: Optional[str] = None):
@@ -208,7 +205,7 @@ class _TorchMemorySaverImpl:
         # device, so keep one pool per device for the disable() path.
         self._disable_mem_pools = (
             defaultdict(lambda: self._device_module.MemPool())
-            if hasattr(torch, "musa")
+            if is_musa()
             else None
         )
 
@@ -334,13 +331,13 @@ class _TorchMemorySaverImpl:
                 "Allocate outside a region() instead of using disable()."
             )
 
-        is_musa = hasattr(torch, "musa")
+        musa = is_musa()
         if dispose_mem_pool_after_use is None:
-            if is_musa:
+            if musa:
                 dispose_mem_pool_after_use = os.environ.get("TMS_DISABLE_POOL_DISPOSE") == "1"
             else:
                 dispose_mem_pool_after_use = True
-        if not is_musa:
+        if not musa:
             assert dispose_mem_pool_after_use, "Only dispose_mem_pool_after_use=true is supported now"
         assert self._binary_wrapper.cdll.tms_get_interesting_region(), "disable() should be called only when tms is active"
 
@@ -357,7 +354,7 @@ class _TorchMemorySaverImpl:
             # is active, and callers such as slime call empty_cache() inside this
             # region, so replace empty_cache with a no-op for the duration of the region.
             saved = []
-            if is_musa:
+            if musa:
                 for module_name in ("musa", "cuda"):
                     module = getattr(torch, module_name, None)
                     if module is not None and hasattr(module, "empty_cache"):
@@ -413,7 +410,7 @@ class _TorchMemorySaverImpl:
         return device_ids[:count]
 
     def get_cpu_backup(self, x: torch.Tensor, zero_copy: bool = False):
-        assert x.is_cuda or x.is_xpu, f"{x.device=}"
+        assert x.is_cuda or x.is_xpu or x.device.type == "musa", f"{x.device=}"
         assert x.is_contiguous(), f"{x.shape=} {x.stride()=} {x.dtype=}"
 
         nbytes = x.nbytes
@@ -439,7 +436,8 @@ class _TorchMemorySaverImpl:
         return ans
 
 def _sanity_checks():
-    if "expandable_segments:True" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""):
-        raise RuntimeError(
-            "TorchMemorySaver is disabled for the current process because expandable_segments is not supported yet."
-        )
+    for alloc_conf in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_MUSA_ALLOC_CONF"):
+        if "expandable_segments:True" in os.environ.get(alloc_conf, ""):
+            raise RuntimeError(
+                "TorchMemorySaver is disabled for the current process because expandable_segments is not supported yet."
+            )

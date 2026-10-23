@@ -19,7 +19,8 @@ def _is_rocm_torch() -> bool:
     return bool(getattr(torch.version, "hip", None))
 
 
-def _is_musa_torch() -> bool:
+def is_musa() -> bool:
+    """True when torch is a MUSA build (torch_musa registers torch.musa)."""
     try:
         import torch
     except ImportError:
@@ -80,8 +81,8 @@ def get_binary_path_from_package(stem: str):
     the detected GPU runtime.
 
     CUDA wheels ship multiple suffixed builds (e.g. `<stem>_cu12.abi3.so`,
-    `<stem>_cu13.abi3.so`). ROCm builds ship an unsuffixed binary
-    (e.g. `<stem>.abi3.so`).
+    `<stem>_cu13.abi3.so`). ROCm, MUSA and Intel XPU builds ship an unsuffixed
+    binary (e.g. `<stem>.abi3.so`).
 
     Raises:
         RuntimeError: if no GPU runtime can be detected, or if zero or
@@ -92,7 +93,7 @@ def get_binary_path_from_package(stem: str):
     if _is_rocm_torch():
         pattern = f"{stem}.*.so"
         runtime_desc = "ROCm/HIP torch"
-    elif _is_musa_torch():
+    elif is_musa():
         pattern = f"{stem}.*.so"
         runtime_desc = "MUSA torch"
     elif is_xpu():
