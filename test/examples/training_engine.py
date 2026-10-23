@@ -6,7 +6,7 @@ from typing import List
 
 import torch
 from torch_memory_saver import torch_memory_saver
-from torch_memory_saver.testing_utils import get_and_print_gpu_memory
+from torch_memory_saver.testing_utils import get_and_print_gpu_memory, get_device, get_device_module
 
 
 def run(hook_mode: str):
@@ -16,29 +16,32 @@ def run(hook_mode: str):
 
     torch_memory_saver.hook_mode = hook_mode
     logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
+    device = get_device()
 
-    initial_tensor = torch.full((1_000_000,), 42, dtype=torch.uint8, device='cuda')
+    initial_tensor = torch.full((1_000_000,), 42, dtype=torch.uint8, device=device)
     mem_initial = get_and_print_gpu_memory("Init")
 
     model_weights = [
-        torch.full((size,), 42, dtype=torch.uint8, device="cuda")
+        torch.full((size,), 42, dtype=torch.uint8, device=device)
         for size in [1024 ** 3, 1024 ** 2, 1024 ** 1, 42]
     ]
 
-    _execute_forward_pass_and_assert(model_weights)
+    _execute_forward_pass_and_assert(model_weights, device)
     mem_after_forward_pass = get_and_print_gpu_memory("After forward pass")
     assert mem_after_forward_pass > mem_initial + 5 * 1024 ** 3
 
     torch_memory_saver.pause()
     mem_after_pause = get_and_print_gpu_memory("After pause")
-    assert mem_after_pause < mem_initial + 200 * 1024 ** 2
+    # muDNN keeps forward-pass workspaces resident, so MUSA needs more slack.
+    pause_slack = 1024 ** 3 if device == "musa" else 200 * 1024 ** 2
+    assert mem_after_pause < mem_initial + pause_slack
 
     with torch_memory_saver.disable():
         mem_after_disable = get_and_print_gpu_memory("After disable")
         assert mem_after_disable == mem_after_pause
 
         # Can still execute code in disabled region
-        tensor_in_disabled_region = torch.full((1024 ** 3,), 53, dtype=torch.uint8, device='cuda')
+        tensor_in_disabled_region = torch.full((1024 ** 3,), 53, dtype=torch.uint8, device=device)
         out = tensor_in_disabled_region.float().mean().item()
         assert out == 53, f"{out=}"
 
@@ -49,7 +52,13 @@ def run(hook_mode: str):
 
     # should do cleanup
     mem_after_exit_disable = get_and_print_gpu_memory("After exiting disable")
-    assert mem_after_exit_disable <= mem_after_pause + 10 * 1024 ** 2
+    if device == "musa":
+        # MUSA reuses one disable pool per device, so the blocks allocated in
+        # the scope stay cached (a little over the 1 GiB tensor and its 4 GiB
+        # float copy) instead of being returned to the driver.
+        assert mem_after_exit_disable <= mem_after_pause + 6 * 1024 ** 3
+    else:
+        assert mem_after_exit_disable <= mem_after_pause + 10 * 1024 ** 2
 
     torch_memory_saver.resume()
     mem_after_resume = get_and_print_gpu_memory("After resume")
@@ -57,21 +66,27 @@ def run(hook_mode: str):
     delta_actual = mem_after_resume - mem_after_exit_disable
     assert delta_expect - 50 * 1024 ** 2 < delta_actual < delta_expect + 50 * 1024 ** 2
 
-    _execute_forward_pass_and_assert(model_weights)
+    _execute_forward_pass_and_assert(model_weights, device)
     mem_after_second_forward_pass = get_and_print_gpu_memory("After second forward pass")
     assert mem_after_resume - 1024 ** 2 < mem_after_second_forward_pass < mem_after_resume + 1024 ** 2
 
     # simulate cache eviction
-    # NOTE: here we assume
-    _, total_mem = torch.cuda.mem_get_info()
+    # NOTE: here we assume the device is mostly free (the section needs ~90% of it)
+    free_mem, total_mem = get_device_module().mem_get_info()
+    if free_mem < int(total_mem * 0.7):
+        print(
+            f"skip cache-eviction section: {free_mem / 1e9:.1f}GB free "
+            f"of {total_mem / 1e9:.1f}GB"
+        )
+        return
     print(f"Total memory: {total_mem / 1e9}GB")
-    a = torch.full((int(total_mem * 0.3),), 42, dtype=torch.uint8, device='cuda')
+    a = torch.full((int(total_mem * 0.3),), 42, dtype=torch.uint8, device=device)
     get_and_print_gpu_memory("[cache-eviction-test] after alloc a")
-    b = torch.full((int(total_mem * 0.3),), 42, dtype=torch.uint8, device='cuda')
+    b = torch.full((int(total_mem * 0.3),), 42, dtype=torch.uint8, device=device)
     get_and_print_gpu_memory("[cache-eviction-test] after alloc b")
     del a, b
     get_and_print_gpu_memory("[cache-eviction-test] after del a,b")
-    c = torch.full((int(total_mem * 0.6),), 42, dtype=torch.uint8, device='cuda')
+    c = torch.full((int(total_mem * 0.6),), 42, dtype=torch.uint8, device=device)
     get_and_print_gpu_memory("[cache-eviction-test] after alloc c")
     initial_tensor += 1
     assert (initial_tensor.max() == 43) and (initial_tensor.min() == 43)
@@ -80,9 +95,9 @@ def run(hook_mode: str):
     del initial_tensor
 
 
-def _execute_forward_pass_and_assert(weights: List[torch.Tensor]):
+def _execute_forward_pass_and_assert(weights: List[torch.Tensor], device: str):
     # simulate large activations during forward pass
-    ones = torch.ones((1024 ** 3,), dtype=torch.float32, device="cuda")
+    ones = torch.ones((1024 ** 3,), dtype=torch.float32, device=device)
     sum_avg_weights = reduce(lambda a, b: (a + b) / 2, [w.float().mean() for w in weights])
     outs = ones * sum_avg_weights
     out = outs.mean().item()

@@ -29,12 +29,15 @@ _RUNTIME_TEST_MODULES = (
     "test_affected_devices.py",
     "test_configure_subprocess.py",
     "test_examples.py",
+    "test_musa_backend.py",
     "test_preload_hook_loader.py",
     "test_utils.py",
 )
 _BUILD_TOOL_TEST_MODULES = ("test_merge_cuda_wheels.py", "test_setup_rpath.py")
 _MULTI_DEVICE_SKIP_REASON = "Multi-device test requires at least two devices"
 _XPU_SKIP_REASON = "XPU-specific path"
+_MUSA_SKIP_REASON = "MUSA-specific path"
+_MUSA_BACKEND_SKIP_REASON = "MUSA-only backend path"
 _LUPINE_SKIP_REASON = (
     "Lupine GPU-over-IP does not preserve native pinned-host or process RSS semantics"
 )
@@ -54,6 +57,24 @@ _EXPECTED_SINGLE_GPU_SKIPS = (
     (
         "test/test_examples.py::test_multi_device_torch_mode",
         _MULTI_DEVICE_SKIP_REASON,
+    ),
+    *(
+        (
+            f"test/test_examples.py::{test_name}[{hook_mode}]",
+            _MUSA_SKIP_REASON,
+        )
+        for test_name in (
+            "test_musa_resume_zeroes_unbacked_region",
+            "test_musa_disable_reuses_device_pool",
+        )
+        for hook_mode in ("preload", "torch")
+    ),
+    *(
+        (f"test/test_musa_backend.py::{test_name}", _MUSA_BACKEND_SKIP_REASON)
+        for test_name in (
+            "test_torch_cuda_entry_points_alias_musa",
+            "test_preload_binary_is_unsuffixed",
+        )
     ),
     *(
         (f"test/test_examples.py::{test_name}", _XPU_SKIP_REASON)
@@ -106,7 +127,7 @@ python -m pip install --no-cache-dir pytest==8.3.5 nvidia-ml-py==12.570.86
 python -m pip install --no-deps "/workspace/dist/torch_memory_saver-${TMS_RELEASE_VERSION}-cp39-abi3-manylinux2014_x86_64.whl"
 mkdir -p /validation/test
 cp -a /workspace/test/examples /validation/test/examples
-cp /workspace/test/test_affected_devices.py /workspace/test/test_configure_subprocess.py /workspace/test/test_examples.py /workspace/test/test_preload_hook_loader.py /workspace/test/test_utils.py /validation/test/
+cp /workspace/test/test_affected_devices.py /workspace/test/test_configure_subprocess.py /workspace/test/test_examples.py /workspace/test/test_musa_backend.py /workspace/test/test_preload_hook_loader.py /workspace/test/test_utils.py /validation/test/
 cp /workspace/.claude/skills/tms-publish-release/scripts/pytest_skip_gate.py /validation/pytest_skip_gate.py
 cd /validation
 python -c 'from pathlib import Path; import torch_memory_saver; path=Path(torch_memory_saver.__file__); print(path); assert "site-packages" in path.parts'
@@ -120,7 +141,7 @@ python3 -m pip install --break-system-packages --only-binary=:all: --no-cache-di
 python3 -m pip install --break-system-packages --no-deps "/workspace/dist/torch_memory_saver-${TMS_RELEASE_VERSION}-cp39-abi3-manylinux2014_aarch64.whl"
 mkdir -p /validation/test
 cp -a /workspace/test/examples /validation/test/examples
-cp /workspace/test/test_affected_devices.py /workspace/test/test_configure_subprocess.py /workspace/test/test_examples.py /workspace/test/test_preload_hook_loader.py /workspace/test/test_utils.py /validation/test/
+cp /workspace/test/test_affected_devices.py /workspace/test/test_configure_subprocess.py /workspace/test/test_examples.py /workspace/test/test_musa_backend.py /workspace/test/test_preload_hook_loader.py /workspace/test/test_utils.py /validation/test/
 cp /workspace/.claude/skills/tms-publish-release/scripts/pytest_skip_gate.py /validation/pytest_skip_gate.py
 cd /validation
 python3 - <<'PY'

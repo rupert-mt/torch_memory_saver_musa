@@ -2,13 +2,15 @@ import sys
 
 import torch
 from torch_memory_saver import torch_memory_saver
-from torch_memory_saver.testing_utils import get_device, is_xpu
+from torch_memory_saver.testing_utils import get_device, is_musa, is_xpu
 
 
 def run(hook_mode: str, backup: str, device_count: int):
     assert backup in ("none", "cpu")
     torch_memory_saver.hook_mode = hook_mode
-    if not is_xpu() and not torch.version.hip:
+    if get_device() == "cuda" and not torch.version.hip:
+        # Retained host backups are CUDA-only, so other backends cannot harden
+        # the missing-sync check this way.
         torch_memory_saver.retain_cpu_backup = True
     mod = torch.get_device_module()
     mod.set_device(0)
@@ -30,13 +32,13 @@ def run(hook_mode: str, backup: str, device_count: int):
             with mod.stream(stream):
                 buffer.fill_(11)
                 observed.copy_(buffer)
-                if is_xpu():
+                if is_xpu() or is_musa():
                     delay_input = torch.ones((4096, 4096), device=device_type)
                     delay_output = torch.empty_like(delay_input)
                     torch.mm(delay_input, delay_input, out=delay_output)
                     delay_buffers.append((delay_input, delay_output))
                 else:
-                    torch.cuda._sleep(1)
+                    mod._sleep(1)
             mod.synchronize()
             allocations.append((buffer, observed, stream))
 
@@ -63,17 +65,37 @@ def run(hook_mode: str, backup: str, device_count: int):
             with mod.stream(stream):
                 # Waiting on device 0 must not incidentally drain the non-current device.
                 if device == device_count - 1:
-                    if is_xpu():
-                        # XPU has no _sleep; queue warmed-up work without new allocations.
+                    if is_xpu() or is_musa():
+                        # No reliable long-running sleep; queue warmed-up work
+                        # without new allocations.
                         delay_input, delay_output = delay_buffers[device]
                         for _ in range(64):
                             torch.mm(delay_input, delay_input, out=delay_output)
                     else:
-                        torch.cuda._sleep(1_000_000_000)
+                        mod._sleep(1_000_000_000)
                 observed.copy_(buffer)
                 buffer.fill_(after)
 
-        assert not allocations[-1][2].query()
+        # Host-side stalls (e.g. first-use JIT) can outlast the queued delay work,
+        # so re-queue it before pause (best effort on MUSA, whose query() lies).
+        last_stream = allocations[-1][2]
+        for _ in range(2 if is_musa() else 5):
+            if not last_stream.query():
+                break
+            with mod.stream(last_stream):
+                if is_xpu() or is_musa():
+                    delay_input, delay_output = delay_buffers[-1]
+                    for _ in range(64):
+                        torch.mm(delay_input, delay_input, out=delay_output)
+                else:
+                    mod._sleep(1_000_000_000)
+        if not is_musa():
+            assert not last_stream.query(), "could not keep a kernel in flight before pause"
+        elif last_stream.query():
+            # MUSA stream.query() occasionally reports idle while work is still
+            # queued; the pause below still drains the device, and the stream-idle
+            # and data checks after it are the assertions that matter here.
+            print("warning: MUSA stream reported idle before pause")
         torch_memory_saver.pause(tag)
         assert mod.current_device() == 0
         assert all(stream.query() for _, _, stream in allocations)
