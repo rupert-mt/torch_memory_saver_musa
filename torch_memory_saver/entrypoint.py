@@ -96,6 +96,13 @@ class TorchMemorySaver:
     def pause(self, tag: Optional[str] = None):
         """Pause memory for specific tag or all memory if tag is None"""
         self._ensure_initialized()
+        # MUSA only: drain already-enqueued work before the region is unmapped.
+        # _impl.pause() also syncs the devices reported for the tag, but that
+        # list comes from the allocation map: a tag/device mismatch would skip
+        # the sync and still let tms_pause() unmap the region, so keep an
+        # unconditional drain as well.
+        if is_musa() and os.environ.get("TMS_PAUSE_SYNC", "1") == "1":
+            torch.get_device_module().synchronize()
         self._impl.pause(tag=tag)
 
     def resume(self, tag: Optional[str] = None):
@@ -395,7 +402,9 @@ class _TorchMemorySaverImpl:
             self._sync_affected_devices(tag)
 
     def _sync_affected_devices(self, tag: Optional[str]):
-        for device in self._affected_devices(tag):
+        devices = self._affected_devices(tag)
+        logger.debug("syncing devices %s before pause(tag=%r)", devices, tag)
+        for device in devices:
             self._device_module.synchronize(device)
 
     def _affected_devices(self, tag: Optional[str]) -> list[int]:
