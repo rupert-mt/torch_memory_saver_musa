@@ -75,26 +75,7 @@ def run(hook_mode: str, backup: str, device_count: int):
                 observed.copy_(buffer)
                 buffer.fill_(after)
 
-        # Host-side stalls (e.g. first-use JIT) can outlast the queued delay work,
-        # so re-queue it before pause.
-        last_stream = allocations[-1][2]
-        for _ in range(2 if is_musa() else 5):
-            if not last_stream.query():
-                break
-            with mod.stream(last_stream):
-                if is_xpu() or is_musa():
-                    delay_input, delay_output = delay_buffers[-1]
-                    for _ in range(64):
-                        torch.mm(delay_input, delay_input, out=delay_output)
-                else:
-                    mod._sleep(1_000_000_000)
-        if not is_musa():
-            assert not last_stream.query(), "could not keep a kernel in flight before pause"
-        elif last_stream.query():
-            # MUSA's stream.query() can report idle while work is still queued.
-            # The pause below drains the device, and the data checks after it
-            # remain the assertion that matters.
-            print("warning: MUSA stream reported idle before pause")
+        assert not allocations[-1][2].query()
         torch_memory_saver.pause(tag)
         assert mod.current_device() == 0
         assert all(stream.query() for _, _, stream in allocations)

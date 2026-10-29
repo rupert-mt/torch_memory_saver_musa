@@ -104,31 +104,27 @@ def test_cpu_backup_backend_rejects_mmap_on_rocm(monkeypatch):
             pass
 
 
-@pytest.mark.skipif(entrypoint_mod.is_xpu(), reason="disable() is not supported on XPU")
-def test_disable_rejects_region_nesting():
-    tms = TorchMemorySaver()
-    tms.hook_mode = "torch"
-    with tms.region():
-        with pytest.raises(RuntimeError, match="inside a region"):
-            with tms.disable():
-                pass
-
-
-@pytest.mark.skipif(entrypoint_mod.is_xpu(), reason="disable() is not supported on XPU")
-def test_disable_rejects_nested_disable(monkeypatch):
-    monkeypatch.setenv("TMS_INIT_ENABLE", "1")
-    tms = TorchMemorySaver()
-    tms.hook_mode = "torch"
-    tms._ensure_initialized()
-    tms._impl._binary_wrapper.cdll.tms_set_interesting_region(True)
-    with tms.disable():
-        with pytest.raises(RuntimeError, match="cannot be nested"):
-            with tms.disable():
-                pass
-
-
 if utils.is_musa():
     # Defined only on MUSA so other backends do not collect MUSA-only skips.
+
+    def test_disable_rejects_region_nesting():
+        tms = TorchMemorySaver()
+        tms.hook_mode = "torch"
+        with tms.region():
+            with pytest.raises(RuntimeError, match="inside a region"):
+                with tms.disable():
+                    pass
+
+    def test_disable_rejects_nested_disable(monkeypatch):
+        monkeypatch.setenv("TMS_INIT_ENABLE", "1")
+        tms = TorchMemorySaver()
+        tms.hook_mode = "torch"
+        tms._ensure_initialized()
+        tms._impl._binary_wrapper.cdll.tms_set_interesting_region(True)
+        with tms.disable():
+            with pytest.raises(RuntimeError, match="cannot be nested"):
+                with tms.disable():
+                    pass
 
     def test_preload_binary_is_unsuffixed():
         try:
